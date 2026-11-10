@@ -9,13 +9,18 @@ photoframe/
 │   ├── index.html          （轮播页面，单文件，无外部依赖）
 │   ├── list.js             （可选清单，不用就留空或删掉）
 │   └── 001.jpg … 005.jpg   （演示图，可删掉换成自己的照片）
-├── preview.png             （渲染效果预览）
+├── media/
+│   └── preview.gif         （轮播动图，640×360）
+├── preview.png             （静帧截图，也可用作仓库社交预览图）
 ├── LICENSE                 （MIT）
 ├── .gitignore
 └── README.md
 ```
 
-![渲染效果](preview.png)
+![轮播效果](media/preview.gif)
+
+动图只演示切换节奏：640×360，五张图一轮约 7 秒；实际页面是全屏播放，图片按原始比例居中，
+四周用同图模糊版补底。
 
 ---
 
