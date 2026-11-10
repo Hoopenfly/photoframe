@@ -1,0 +1,431 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+<title>相框轮播</title>
+<style>
+	html, body {
+		width: 100%;
+		height: 100%;
+		margin: 0;
+		padding: 0;
+		background: #000;
+		overflow: hidden;
+		/*禁用长按选中与系统默认的高亮，避免触屏上误触选中文字*/
+		-webkit-user-select: none;
+		user-select: none;
+		-webkit-tap-highlight-color: rgba(0, 0, 0, 0);
+		cursor: default;
+	}
+	/*模糊底衬：用当前图自身放大模糊，补满左右或上下的黑边*/
+	#backdrop {
+		position: absolute;
+		left: 0;
+		top: 0;
+		width: 100%;
+		height: 100%;
+		background-position: center center;
+		background-repeat: no-repeat;
+		background-size: cover;
+		-webkit-filter: blur(28px) brightness(0.42);
+		filter: blur(28px) brightness(0.42);
+		/*放大一点，避免模糊后四周出现半透明亮边*/
+		-webkit-transform: scale(1.12);
+		transform: scale(1.12);
+	}
+	/*两张叠放的主图层，靠 opacity 交叉淡入淡出*/
+	.slide {
+		position: absolute;
+		left: 0;
+		top: 0;
+		width: 100%;
+		height: 100%;
+		background-position: center center;
+		background-repeat: no-repeat;
+		background-size: contain;
+		opacity: 0;
+	}
+	#counter {
+		position: absolute;
+		right: 2%;
+		bottom: 2%;
+		font: 12px/1.5 sans-serif;
+		color: rgba(255, 255, 255, 0.5);
+	}
+	#tip {
+		position: absolute;
+		left: 50%;
+		top: 50%;
+		max-width: 80%;
+		padding: 10px 18px;
+		border-radius: 8px;
+		background: rgba(0, 0, 0, 0.62);
+		color: #fff;
+		font: 14px/1.6 sans-serif;
+		text-align: center;
+		white-space: pre-line;
+		opacity: 0;
+		visibility: hidden;
+		-webkit-transition: opacity 0.25s linear;
+		transition: opacity 0.25s linear;
+		-webkit-transform: translate(-50%, -50%);
+		transform: translate(-50%, -50%);
+		pointer-events: none;
+	}
+	#tip.show {
+		opacity: 1;
+		visibility: visible;
+	}
+	/*CONFIG.blur 为 false 或地址栏加 ?blur=0 时隐藏底衬（老设备省性能）*/
+	html.no-blur #backdrop {
+		display: none;
+	}
+</style>
+</head>
+<body>
+<div id="backdrop"></div>
+<div class="slide" id="slideA"></div>
+<div class="slide" id="slideB"></div>
+<div id="counter"></div>
+<div id="tip"></div>
+<!--可选清单：图片文件名不规则时在同目录放 list.js（里面写 window.PHOTOS=[...]）。
+    没有这个文件只会在控制台留一条 404，不影响按编号自动探测。-->
+<script src="list.js"></script>
+<script>
+/* ============================================================================
+ * 本地图片轮播（纯静态、零依赖、file:// 下可用）
+ * 用法：把本文件与图片放同一目录，双击打开即可。
+ * 图片命名：从 001.jpg 起连续编号（001.jpg、002.jpg …），命名格式自动识别；
+ *           也可用同目录下的 list.js 显式给出清单（见 README）。
+ * 地址栏参数：?interval=3000（间隔毫秒） ?blur=0（关闭模糊底衬）
+ * 交互：轻触/点击任意位置暂停或继续；空格键同样切换。
+ * 注：全文件用 ES5 写法，兼容老 Android WebView；不发起任何 fetch/XHR，
+ *     因为 file:// 协议下这类请求会被浏览器的同源策略拦掉。
+ * ==========================================================================*/
+
+var CONFIG = {
+	interval: 3000,      //每张图停留毫秒数
+	fade: 800,           //交叉淡入淡出毫秒数
+	startNum: 1,         //起始编号
+	maxProbe: 999,       //最多探测到多少号，防止死循环
+	tolerance: 0,        //允许中间缺几张后仍继续；0 表示遇到第一处缺失就结束
+	exts: ['.jpg', '.jpeg', '.png', '.webp'],
+	blur: true,          //模糊底衬开关
+	showCounter: true    //右下角显示“当前/总数”
+};
+
+(function () {
+	'use strict';
+
+	var backdrop = document.getElementById('backdrop');
+	var counter = document.getElementById('counter');
+	var tip = document.getElementById('tip');
+	var slides = [document.getElementById('slideA'), document.getElementById('slideB')];
+	var visible = 0;        //当前可见的是哪一层：0 或 1
+	var photos = [];        //图片地址清单
+	var idx = 0;            //当前显示到清单的第几张
+	var timer = null;       //轮播定时器
+	var paused = false;     //用户是否手动暂停
+	var tipTimer = null;    //提示浮层的隐藏定时器
+
+	/* ------------------------------ 工具函数 ------------------------------ */
+
+	//读取地址栏参数，没有则返回 null
+	function getParam(name) {
+		var m = new RegExp('[?&]' + name + '=([^&]*)').exec(location.search);
+		return m ? decodeURIComponent(m[1]) : null;
+	}
+
+	//数字左补零：3 + 宽度3 => "003"
+	function pad(num, width) {
+		var s = '' + num;
+		while (s.length < width) {
+			s = '0' + s;
+		}
+		return s;
+	}
+
+	//在屏幕中央弹一条提示；ms 为 0 表示常驻不自动消失
+	function showTip(text, ms) {
+		tip.textContent = text;
+		tip.className = 'show';
+		if (tipTimer) {
+			clearTimeout(tipTimer);
+			tipTimer = null;
+		}
+		if (ms) {
+			tipTimer = setTimeout(function () {
+				tip.className = '';
+				tipTimer = null;
+			}, ms);
+		}
+	}
+
+	function updateCounter() {
+		if (!CONFIG.showCounter) {
+			return;
+		}
+		counter.textContent = photos.length ? (idx + 1) + ' / ' + photos.length : '';
+	}
+
+	/* ---------------------------- 图片探测（存在性） ---------------------------- */
+
+	//探测单个地址是否可加载；onDone(ok) 只会被调用一次
+	function probeOne(url, onDone) {
+		var img = new Image();
+		var done = false;
+		function finish(ok) {
+			if (done) {
+				return;
+			}
+			done = true;
+			img.onload = null;
+			img.onerror = null;
+			onDone(ok);
+		}
+		img.onload = function () { finish(true); };
+		img.onerror = function () { finish(false); };
+		img.src = url;
+	}
+
+	//并行探测一组地址，results 与 urls 一一对应（true 表示存在）
+	function probeGroup(urls, onDone) {
+		var results = new Array(urls.length);
+		var left = urls.length;
+		if (left === 0) {
+			onDone(results);
+			return;
+		}
+		var i;
+		for (i = 0; i < urls.length; i++) {
+			(function (k) {
+				probeOne(urls[k], function (ok) {
+					results[k] = ok;
+					left--;
+					if (left === 0) {
+						onDone(results);
+					}
+				});
+			})(i);
+		}
+	}
+
+	//首张图命名格式自动识别：固定 3 位、2 位、1 位 + 常见扩展名共 12 种组合
+	//优先取 001.jpg（3 位。jpg 优先），命中后返回 {width, ext}
+	function detectFormat(onDone) {
+		var widths = [3, 2, 1];
+		var combos = [];
+		var w, e;
+		for (w = 0; w < widths.length; w++) {
+			for (e = 0; e < CONFIG.exts.length; e++) {
+				combos.push({ width: widths[w], ext: CONFIG.exts[e] });
+			}
+		}
+		var urls = [];
+		var k;
+		for (k = 0; k < combos.length; k++) {
+			urls.push(pad(CONFIG.startNum, combos[k].width) + combos[k].ext);
+		}
+		probeGroup(urls, function (results) {
+			var i;
+			for (i = 0; i < combos.length; i++) {   //按优先级取第一个命中的组合
+				if (results[i]) {
+					onDone(combos[i]);
+					return;
+				}
+			}
+			onDone(null);
+		});
+	}
+
+	//按已识别的格式，把编号 n 变成文件名
+	function makeNamer(fmt) {
+		return function (n) {
+			return pad(n, fmt.width) + fmt.ext;
+		};
+	}
+
+	//从 startNum 起每批 16 张并行探测，遇到缺失（超过 tolerance 张）即停
+	function scanList(namer, from, list, miss, onDone) {
+		if (from > CONFIG.maxProbe) {
+			onDone(list);
+			return;
+		}
+		var urls = [];
+		var n;
+		for (n = from; n < from + 16 && n <= CONFIG.maxProbe; n++) {
+			urls.push(namer(n));
+		}
+		probeGroup(urls, function (results) {
+			var k;
+			for (k = 0; k < results.length; k++) {
+				if (results[k]) {
+					list.push(urls[k]);
+					miss = 0;
+				} else {
+					miss++;
+					if (miss > CONFIG.tolerance) {
+						onDone(list);
+						return;
+					}
+				}
+			}
+			scanList(namer, from + urls.length, list, miss, onDone);
+		});
+	}
+
+	//得到最终图片清单：list.js 优先，其次按文件名规则扫描
+	function discover(onDone) {
+		if (window.PHOTOS && window.PHOTOS.length) {
+			onDone(window.PHOTOS.slice(0));
+			return;
+		}
+		detectFormat(function (fmt) {
+			if (!fmt) {
+				onDone([]);
+				return;
+			}
+			scanList(makeNamer(fmt), CONFIG.startNum, [], 0, onDone);
+		});
+	}
+
+	/* ------------------------------- 播放控制 ------------------------------- */
+
+	//设置某一层的背景图，并把底衬同步成同一张
+	function setImage(layerIndex, url, withBackdrop) {
+		var el = slides[layerIndex];
+		el.style.backgroundImage = 'url("' + url + '")';
+		if (withBackdrop && CONFIG.blur) {
+			backdrop.style.backgroundImage = 'url("' + url + '")';
+		}
+	}
+
+	//首张直接显示（淡入）
+	function showFirst(url) {
+		var el = slides[visible];
+		el.style.transition = 'opacity ' + CONFIG.fade + 'ms linear';
+		setImage(visible, url, true);
+		el.style.opacity = 1;
+		updateCounter();
+	}
+
+	//交叉淡入淡出切到下一张
+	function crossTo(url) {
+		var cur = slides[visible];
+		var nxt = slides[1 - visible];
+		//先无动画地摆好下一张，再按帧切换到不透明
+		nxt.style.transition = 'none';
+		nxt.style.opacity = 0;
+		setImage(1 - visible, url, true);
+		void nxt.offsetWidth;                      //强制重排，让上面的赋值立刻生效
+		nxt.style.transition = 'opacity ' + CONFIG.fade + 'ms linear';
+		nxt.style.opacity = 1;
+		cur.style.transition = 'opacity ' + CONFIG.fade + 'ms linear';
+		cur.style.opacity = 0;
+		visible = 1 - visible;
+		updateCounter();
+	}
+
+	//空跑一次加载，保证切换到该张时已在缓存里（不加入 DOM，只占解码后的缓存）
+	function preload(url) {
+		var img = new Image();
+		img.src = url;
+	}
+
+	function tick() {
+		if (photos.length < 2) {
+			return;
+		}
+		idx = (idx + 1) % photos.length;
+		crossTo(photos[idx]);
+		preload(photos[(idx + 1) % photos.length]);
+	}
+
+	function play() {
+		if (timer) {
+			clearInterval(timer);
+			timer = null;
+		}
+		if (photos.length > 1) {
+			timer = setInterval(tick, CONFIG.interval);
+		}
+	}
+
+	function pause() {
+		if (timer) {
+			clearInterval(timer);
+			timer = null;
+		}
+	}
+
+	function togglePause() {
+		if (photos.length < 2) {
+			showTip(photos.length ? '只有一张图片' : '未找到图片', 1200);
+			return;
+		}
+		if (paused) {
+			paused = false;
+			play();
+			showTip('继续播放', 1000);
+		} else {
+			paused = true;
+			pause();
+			showTip('已暂停\n轻触继续', 0);
+		}
+	}
+
+	/* -------------------------------- 启动 -------------------------------- */
+
+	function start() {
+		var q = parseInt(getParam('interval'), 10);
+		if (!(q >= 300)) {                          //给个下限，避免 0 或非法值把定时器打死
+			q = parseInt(getParam('ms'), 10);
+		}
+		if (q >= 300) {
+			CONFIG.interval = q;
+		}
+		if (getParam('blur') === '0') {
+			CONFIG.blur = false;
+		}
+		if (!CONFIG.blur) {
+			document.documentElement.className = 'no-blur';
+		}
+
+		discover(function (list) {
+			photos = list;
+			if (!photos.length) {
+				showTip('未找到图片\n请把 001.jpg 起连续编号的图片\n放到本文件同一个目录', 0);
+				return;
+			}
+			idx = 0;
+			showFirst(photos[0]);
+			preload(photos.length > 1 ? photos[1] : photos[0]);
+			play();
+		});
+	}
+
+	//轻触/点击暂停，再点继续；空格键等效
+	document.addEventListener('click', togglePause, false);
+	document.addEventListener('touchstart', function () { }, false); //占位，保证老 WebView 的点击不延迟
+	document.addEventListener('keydown', function (ev) {
+		var key = ev.key || ev.keyCode;
+		if (key === ' ' || key === 'Spacebar' || key === 32) {
+			togglePause();
+		}
+	}, false);
+
+	//切到后台（手机锁屏、切 App）时停表省电，回来再继续
+	document.addEventListener('visibilitychange', function () {
+		if (document.hidden) {
+			pause();
+		} else if (!paused) {
+			play();
+		}
+	}, false);
+
+	start();
+}());
+</script>
+</body>
+</html>
